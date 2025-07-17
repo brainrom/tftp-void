@@ -72,7 +72,7 @@ const tftpv_file_t *tftpv_server_search_file_in_list(const char* filename, void 
 {
     const tftpv_file_t *files = userdata;
     size_t i;
-    for (i = 0; *((char*)&files[i]) != '\0'; i++) {
+    for (i = 0; files[i].filename != NULL; i++) {
         if (strcmp(files[i].filename, filename) == 0) {
             return &files[i];
         }
