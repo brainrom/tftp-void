@@ -171,7 +171,7 @@ int tftpv_server_parse(tftpv_serverctx_t *c, const uint8_t *buffer, size_t lengt
 
         /* Send ACK for the received block */
         send_ack(c, block_number);
-        return -1;
+        return 0;
     }
 
     default: /* Unsupported opcode */
