@@ -36,7 +36,7 @@ void send_error(tftpv_serverctx_t *c, tftpv_error_code_t error_code, const char 
     c->send_datagram(error_buffer, 4 + msg_len + 1, c->send_userdata); /* Include null terminator in length */
 }
 
-void send_data_from_handler(tftpv_serverctx_t *c, uint16_t block_number, const tftpv_file_t *reading_file)
+int send_data_from_handler(tftpv_serverctx_t *c, uint16_t block_number, const tftpv_file_t *reading_file)
 {
     uint8_t data_buffer[512]; /* Maximum possible size for a DATA packet */
     tftpv_error_t err = {0};
@@ -46,10 +46,11 @@ void send_data_from_handler(tftpv_serverctx_t *c, uint16_t block_number, const t
     if (err.code!=TFTPV_ERR_UNDEFINED)
     {
         send_error(c, err.code, err.message);
-        return;
+        return -err.code;
     }
 
     c->send_datagram(data_buffer, 4 + data_length, c->send_userdata);
+    return 0;
 }
 
 int32_t check_block_num(tftpv_serverctx_t *c, const uint8_t *buffer)
@@ -100,8 +101,7 @@ int tftpv_server_parse(tftpv_serverctx_t *c, const uint8_t *buffer, size_t lengt
         if (check_block_num(c, buffer)<0)
             return -1;
 
-        send_data_from_handler(c, c->expected_block_number, c->current_file);
-        break;
+        return send_data_from_handler(c, c->expected_block_number, c->current_file);
     }
     case TFTPV_OP_RRQ: /* Read request */
     case TFTPV_OP_WRQ: { /* Write request */
@@ -130,6 +130,7 @@ int tftpv_server_parse(tftpv_serverctx_t *c, const uint8_t *buffer, size_t lengt
 
         c->current_file = found_file;
         c->expected_block_number = 1; /* Reset block number expectation */
+        int ret = 0;
         if (opcode == TFTPV_OP_WRQ && c->current_file->write_block)
         {
             send_ack(c, 0); /* Send ACK for block 0 */
@@ -138,16 +139,15 @@ int tftpv_server_parse(tftpv_serverctx_t *c, const uint8_t *buffer, size_t lengt
         else if (opcode == TFTPV_OP_RRQ && c->current_file->read_block)
         {
             c->current_operation = TFTPV_OP_RRQ;
-            send_data_from_handler(c, 1, c->current_file);
+            ret = send_data_from_handler(c, 1, c->current_file);
         }
         else
         {
             send_error(c, TFTPV_ERR_ILLEGAL_OPERATION, "Current operation is unavailable for this file");
             return -1;
         }
-        return 0;
+        return ret;
     }
-
     case TFTPV_OP_DATA: { /* Data packet */
         if (c->current_file == NULL || c->current_operation!=TFTPV_OP_WRQ) {
             send_error(c, TFTPV_ERR_ILLEGAL_OPERATION, "No active write operation");
