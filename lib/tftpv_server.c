@@ -25,7 +25,7 @@ void send_ack(tftpv_serverctx_t *c, uint16_t block_number) {
 }
 
 /* Helper function to send ERROR */
-void send_error(tftpv_serverctx_t *c, tftpv_error_code_t error_code, const char *error_msg) {
+int send_error(tftpv_serverctx_t *c, tftpv_error_code_t error_code, const char *error_msg) {
     uint8_t error_buffer[512]; /* Maximum possible size for an ERROR packet */
     fill_header(error_buffer, TFTPV_OP_ERROR, error_code);
 
@@ -34,6 +34,7 @@ void send_error(tftpv_serverctx_t *c, tftpv_error_code_t error_code, const char 
     error_buffer[4 + msg_len] = '\0'; /* Null terminator */
 
     c->send_datagram(error_buffer, 4 + msg_len + 1, c->send_userdata); /* Include null terminator in length */
+    return -error_code;
 }
 
 int send_data_from_handler(tftpv_serverctx_t *c, uint16_t block_number, const tftpv_file_t *reading_file)
@@ -45,8 +46,7 @@ int send_data_from_handler(tftpv_serverctx_t *c, uint16_t block_number, const tf
     size_t data_length = reading_file->read_block(data_buffer + 4, block_number, reading_file, &err);
     if (err.code!=TFTPV_ERR_UNDEFINED)
     {
-        send_error(c, err.code, err.message);
-        return -err.code;
+        return send_error(c, err.code, err.message);
     }
 
     c->send_datagram(data_buffer, 4 + data_length, c->send_userdata);
@@ -58,9 +58,9 @@ int32_t check_block_num(tftpv_serverctx_t *c, const uint8_t *buffer)
     uint16_t block_number = (buffer[2] << 8) | buffer[3];
 
     if (block_number != c->expected_block_number && block_number != c->expected_block_number - 1) {
-        send_error(c, TFTPV_ERR_ILLEGAL_OPERATION, "Unexpected block number");
+        int ret = send_error(c, TFTPV_ERR_ILLEGAL_OPERATION, "Unexpected block number");
         c->current_file = NULL; /* Reset current file */
-        return -1;
+        return ret;
     }
 
     if (block_number == c->expected_block_number) {
@@ -83,8 +83,7 @@ const tftpv_file_t *tftpv_server_search_file_in_list(const char* filename, void 
 
 int tftpv_server_parse(tftpv_serverctx_t *c, const uint8_t *buffer, size_t length) {
     if (length < 4) { /* Minimum length for any valid TFTP packet */
-        send_error(c, TFTPV_ERR_ILLEGAL_OPERATION, "Packet too short");
-        return -1;
+        return send_error(c, TFTPV_ERR_ILLEGAL_OPERATION, "Packet too short");
     }
 
     /* Extract opcode from the buffer */
@@ -94,12 +93,12 @@ int tftpv_server_parse(tftpv_serverctx_t *c, const uint8_t *buffer, size_t lengt
     {
         if (c->current_file==NULL || c->current_operation!=TFTPV_OP_RRQ)
         {
-            send_error(c, TFTPV_ERR_ILLEGAL_OPERATION, "No active read operation");
-            return -1;
+            return send_error(c, TFTPV_ERR_ILLEGAL_OPERATION, "No active read operation");
         }
 
-        if (check_block_num(c, buffer)<0)
-            return -1;
+        int32_t acked_block_number = check_block_num(c, buffer);
+        if (acked_block_number<0)
+            return acked_block_number; // if<0, then it's error code
 
         return send_data_from_handler(c, c->expected_block_number, c->current_file);
     }
@@ -110,22 +109,19 @@ int tftpv_server_parse(tftpv_serverctx_t *c, const uint8_t *buffer, size_t lengt
         const char *mode = strchr(filename, '\0') + 1; /* First \0 in filename is the end of filename (and beginning of mode) */
 
         if (!filename || !mode) {
-            send_error(c, TFTPV_ERR_ILLEGAL_OPERATION, "Invalid packet");
-            return -1;
+            return send_error(c, TFTPV_ERR_ILLEGAL_OPERATION, "Invalid packet");
         }
 
         if (strcmp(mode, "octet") != 0)
         {
-            send_error(c, TFTPV_ERR_ILLEGAL_OPERATION, "Only octet mode is supported");
-            return -1;
+            return send_error(c, TFTPV_ERR_ILLEGAL_OPERATION, "Only octet mode is supported");
         }
 
         /* Search for the file */
         const tftpv_file_t *found_file = c->search_file(filename, c->search_userdata);
         if (!found_file) /* File not found */
         {
-            send_error(c, TFTPV_ERR_FILE_NOT_FOUND, "File not found");
-            return -1;
+            return send_error(c, TFTPV_ERR_FILE_NOT_FOUND, "File not found");
         }
 
         c->current_file = found_file;
@@ -143,21 +139,19 @@ int tftpv_server_parse(tftpv_serverctx_t *c, const uint8_t *buffer, size_t lengt
         }
         else
         {
-            send_error(c, TFTPV_ERR_ILLEGAL_OPERATION, "Current operation is unavailable for this file");
-            return -1;
+            return send_error(c, TFTPV_ERR_ILLEGAL_OPERATION, "Current operation is unavailable for this file");
         }
         return ret;
     }
     case TFTPV_OP_DATA: { /* Data packet */
         if (c->current_file == NULL || c->current_operation!=TFTPV_OP_WRQ) {
-            send_error(c, TFTPV_ERR_ILLEGAL_OPERATION, "No active write operation");
-            return -1;
+            return send_error(c, TFTPV_ERR_ILLEGAL_OPERATION, "No active write operation");
         }
 
         int32_t block_number = check_block_num(c, buffer);
 
         if (block_number<0)
-            return -1;
+            return block_number;
 
         /* Call the write function for the current file */
         size_t data_length = length - 4; /* Subtract opcode and block number bytes */
@@ -165,8 +159,7 @@ int tftpv_server_parse(tftpv_serverctx_t *c, const uint8_t *buffer, size_t lengt
         c->current_file->write_block(buffer + 4, block_number, data_length, c->current_file, &err);
         if (err.code!=TFTPV_ERR_UNDEFINED)
         {
-            send_error(c, err.code, err.message);
-            return -1;
+            return send_error(c, err.code, err.message);
         }
 
         /* Send ACK for the received block */
@@ -175,8 +168,6 @@ int tftpv_server_parse(tftpv_serverctx_t *c, const uint8_t *buffer, size_t lengt
     }
 
     default: /* Unsupported opcode */
-        send_error(c, TFTPV_ERR_ILLEGAL_OPERATION, "Unsupported operation");
-        return -1;
+        return send_error(c, TFTPV_ERR_ILLEGAL_OPERATION, "Unsupported operation");
     }
-    return -1;
 }
